@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """
-state_machine_node.py — Delivery Bot state machine with full transitions.
+state_machine_node.py — Delivery Bot state machine V2.
 
 Cycle: WAITING -> SET_DESTINATION -> SIGNAL_MOVE -> MOVING ->
        DELIVERY_READY -> DELIVER -> RETURN_HOME -> WAITING
-With YIELD_STOP if an obstacle appears during MOVING or RETURN_HOME.
+With YIELD_STOP if obstacle appears during MOVING or RETURN_HOME.
+
+Improvements over V1:
+  - Loads "home" waypoint from waypoints.json (fallback to (0,0))
+  - Proportional steering (no turn-in-place; works with QBot odometry drift)
+  - Watchdog: warns if robot stuck during MOVING/RETURN_HOME
+  - Service /reload_waypoints to refresh home without restarting
 
 Send a destination:
     ros2 topic pub --once /destination geometry_msgs/msg/Point \
         "{x: 2.0, y: 0.0, z: 0.0}"
 """
 
+import json
 import math
+import os
 from enum import Enum
 
 import rclpy
@@ -20,6 +28,7 @@ from geometry_msgs.msg import Twist, Point
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 
 class RobotState(Enum):
@@ -38,20 +47,27 @@ class DeliveryBotStateMachine(Node):
     def __init__(self):
         super().__init__('delivery_bot_state_machine')
 
-        # --- Parameters (no hardcoding) -------------------------------
-        self.declare_parameter('cmd_vel_topic', '/cmd_vel')
-        self.declare_parameter('odom_topic', '/odom')
-        self.declare_parameter('scan_topic', '/scan')
-        self.declare_parameter('state_topic', '/robot_state')
+        # --- Topic parameters ----------------------------------------
+        self.declare_parameter('cmd_vel_topic',     '/cmd_vel')
+        self.declare_parameter('odom_topic',        '/odom')
+        self.declare_parameter('scan_topic',        '/scan')
+        self.declare_parameter('state_topic',       '/robot_state')
         self.declare_parameter('destination_topic', '/destination')
 
-        self.declare_parameter('linear_speed', 0.2)
-        self.declare_parameter('angular_speed', 0.5)
-        self.declare_parameter('goal_tolerance', 0.2)
-        self.declare_parameter('obstacle_distance', 0.6)
-        self.declare_parameter('signal_duration', 2.0)
-        self.declare_parameter('handoff_duration', 3.0)
-        self.declare_parameter('deliver_duration', 2.0)
+        # --- Behavior parameters -------------------------------------
+        self.declare_parameter('linear_speed',      0.4)
+        self.declare_parameter('angular_speed',     1.0)
+        self.declare_parameter('steering_gain',     0.8)   # proportional steer multiplier
+        self.declare_parameter('goal_tolerance',    0.3)
+        self.declare_parameter('obstacle_distance', 0.3)
+        self.declare_parameter('signal_duration',   2.0)
+        self.declare_parameter('handoff_duration',  3.0)
+        self.declare_parameter('deliver_duration',  2.0)
+        self.declare_parameter('watchdog_timeout',  20.0)  # warn if no progress this long
+
+        # --- Waypoint file (for home location) -----------------------
+        default_wp = os.path.expanduser('~/qbot-delivery/waypoints.json')
+        self.declare_parameter('waypoints_file',    default_wp)
 
         cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
         odom_topic    = self.get_parameter('odom_topic').value
@@ -59,13 +75,16 @@ class DeliveryBotStateMachine(Node):
         state_topic   = self.get_parameter('state_topic').value
         dest_topic    = self.get_parameter('destination_topic').value
 
-        self.linear_speed     = self.get_parameter('linear_speed').value
-        self.angular_speed    = self.get_parameter('angular_speed').value
-        self.goal_tolerance   = self.get_parameter('goal_tolerance').value
-        self.obstacle_distance= self.get_parameter('obstacle_distance').value
-        self.signal_duration  = self.get_parameter('signal_duration').value
-        self.handoff_duration = self.get_parameter('handoff_duration').value
-        self.deliver_duration = self.get_parameter('deliver_duration').value
+        self.linear_speed      = self.get_parameter('linear_speed').value
+        self.angular_speed     = self.get_parameter('angular_speed').value
+        self.steering_gain     = self.get_parameter('steering_gain').value
+        self.goal_tolerance    = self.get_parameter('goal_tolerance').value
+        self.obstacle_distance = self.get_parameter('obstacle_distance').value
+        self.signal_duration   = self.get_parameter('signal_duration').value
+        self.handoff_duration  = self.get_parameter('handoff_duration').value
+        self.deliver_duration  = self.get_parameter('deliver_duration').value
+        self.watchdog_timeout  = self.get_parameter('watchdog_timeout').value
+        self.waypoints_file    = self.get_parameter('waypoints_file').value
 
         # --- Pubs / Subs ---------------------------------------------
         self.cmd_pub   = self.create_publisher(Twist,  cmd_vel_topic, 10)
@@ -74,17 +93,53 @@ class DeliveryBotStateMachine(Node):
         self.create_subscription(LaserScan, scan_topic, self.scan_callback,        10)
         self.create_subscription(Point,     dest_topic, self.destination_callback, 10)
 
+        # Service to reload waypoints (so you can re-save home and refresh without restart)
+        self.create_service(Trigger, 'reload_waypoints', self.handle_reload_waypoints)
+
         # --- Internal state ------------------------------------------
-        self.state = RobotState.WAITING
+        self.state          = RobotState.WAITING
         self.previous_state = None
-        self.latest_odom = None
-        self.latest_scan = None
-        self.goal = None
-        self.home = Point()
-        self.timer_start = None
+        self.latest_odom    = None
+        self.latest_scan    = None
+        self.goal           = None
+        self.home           = self._load_home()
+        self.timer_start    = None
+        self.last_progress_time = None
+        self.last_progress_dist = None
 
         self.create_timer(0.1, self.tick)
-        self.get_logger().info(f'Started. State = {self.state.value}')
+        self.get_logger().info(
+            f'State machine ready. State={self.state.value} '
+            f'home=({self.home.x:.2f}, {self.home.y:.2f}) '
+            f'lin={self.linear_speed} ang={self.angular_speed} '
+            f'obs_dist={self.obstacle_distance}'
+        )
+
+    # --- Waypoint loading --------------------------------------------
+    def _load_home(self):
+        """Load 'home' from waypoints file, fallback to (0,0)."""
+        try:
+            if os.path.exists(self.waypoints_file):
+                with open(self.waypoints_file) as f:
+                    data = json.load(f)
+                if 'home' in data:
+                    h = data['home']
+                    p = Point(x=float(h['x']), y=float(h['y']), z=0.0)
+                    self.get_logger().info(
+                        f"Loaded home from {self.waypoints_file}: ({p.x:.2f}, {p.y:.2f})")
+                    return p
+        except Exception as e:
+            self.get_logger().warn(f'Could not load home waypoint: {e}')
+        self.get_logger().info('No home waypoint found; defaulting to (0,0).')
+        return Point(x=0.0, y=0.0, z=0.0)
+
+    def handle_reload_waypoints(self, req, resp):
+        old = (self.home.x, self.home.y)
+        self.home = self._load_home()
+        resp.success = True
+        resp.message = f'Home: ({old[0]:.2f},{old[1]:.2f}) -> ({self.home.x:.2f},{self.home.y:.2f})'
+        self.get_logger().info(resp.message)
+        return resp
 
     # --- Callbacks ---------------------------------------------------
     def odom_callback(self, msg): self.latest_odom = msg
@@ -121,6 +176,8 @@ class DeliveryBotStateMachine(Node):
                 self.previous_state = self.state
             self.state = new_state
             self.timer_start = self.get_clock().now()
+            self.last_progress_time = self.get_clock().now()
+            self.last_progress_dist = None
 
     def publish_state(self):
         msg = String(); msg.data = self.state.value
@@ -130,7 +187,9 @@ class DeliveryBotStateMachine(Node):
         self.cmd_pub.publish(Twist())
 
     def drive(self, linear, angular):
-        t = Twist(); t.linear.x = float(linear); t.angular.z = float(angular)
+        t = Twist()
+        t.linear.x  = float(linear)
+        t.angular.z = float(angular)
         self.cmd_pub.publish(t)
 
     def elapsed_in_state(self):
@@ -149,6 +208,7 @@ class DeliveryBotStateMachine(Node):
         return math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z))
 
     def drive_toward(self, target):
+        """Proportional control: always drive forward, steer toward target."""
         if self.latest_odom is None: return
         cx = self.latest_odom.pose.pose.position.x
         cy = self.latest_odom.pose.pose.position.y
@@ -156,10 +216,11 @@ class DeliveryBotStateMachine(Node):
         err = target_heading - self.heading()
         while err >  math.pi: err -= 2*math.pi
         while err < -math.pi: err += 2*math.pi
-        if abs(err) > 0.3:
-            self.drive(0.0, self.angular_speed * (1 if err > 0 else -1))
-        else:
-            self.drive(self.linear_speed, err)
+        angular = err * self.steering_gain
+        # clamp angular to declared max
+        if   angular >  self.angular_speed: angular =  self.angular_speed
+        elif angular < -self.angular_speed: angular = -self.angular_speed
+        self.drive(self.linear_speed, angular)
 
     def obstacle_ahead(self):
         if self.latest_scan is None: return False
@@ -170,6 +231,21 @@ class DeliveryBotStateMachine(Node):
         window = n // 12
         valid = [x for x in r[front-window:front+window] if x > 0.05]
         return bool(valid) and min(valid) < self.obstacle_distance
+
+    def _check_watchdog(self, target):
+        """Warn if robot doesn't make progress toward target for too long."""
+        d = self.distance_to(target)
+        now = self.get_clock().now()
+        if self.last_progress_dist is None or d < self.last_progress_dist - 0.05:
+            self.last_progress_dist = d
+            self.last_progress_time = now
+            return
+        idle = (now - self.last_progress_time).nanoseconds / 1e9
+        if idle > self.watchdog_timeout:
+            self.get_logger().warn(
+                f'Watchdog: no progress for {idle:.1f}s, dist={d:.2f}. '
+                'Check odometry / wheel slip / obstacle.')
+            self.last_progress_time = now  # avoid log spam
 
     # --- State handlers ---------------------------------------------
     def handle_waiting(self):
@@ -191,6 +267,7 @@ class DeliveryBotStateMachine(Node):
             self.transition_to(RobotState.YIELD_STOP); return
         if self.distance_to(self.goal) < self.goal_tolerance:
             self.transition_to(RobotState.DELIVERY_READY); return
+        self._check_watchdog(self.goal)
         self.drive_toward(self.goal)
 
     def handle_yield_stop(self):
@@ -215,9 +292,10 @@ class DeliveryBotStateMachine(Node):
         if self.obstacle_ahead():
             self.transition_to(RobotState.YIELD_STOP); return
         if self.distance_to(self.home) < self.goal_tolerance:
-            self.get_logger().info('Home.')
+            self.get_logger().info('Home reached.')
             self.goal = None
             self.transition_to(RobotState.WAITING); return
+        self._check_watchdog(self.home)
         self.drive_toward(self.home)
 
     def handle_error(self):

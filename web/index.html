@@ -7,16 +7,19 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f0f1e; color: #e0e0e0; min-height: 100vh; padding: 20px; }
-  header { display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; background: #1a1a2e; border-radius: 12px; margin-bottom: 20px; }
+  header { display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; background: #1a1a2e; border-radius: 12px; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
   header h1 { font-size: 24px; }
-  .header-right { display: flex; gap: 12px; align-items: center; }
+  .header-right { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  #host-input { padding: 6px 10px; background: #2a2a3e; border: 1px solid #3a3a4e; color: #ccc; border-radius: 20px; font-size: 13px; font-family: "Monaco", monospace; width: 160px; }
   #connection { font-size: 14px; padding: 6px 12px; border-radius: 20px; background: #2a2a3e; }
   .audio-toggle { display: flex; align-items: center; gap: 6px; font-size: 14px; padding: 6px 12px; background: #2a2a3e; border-radius: 20px; cursor: pointer; }
   .audio-toggle input { cursor: pointer; }
   main { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; }
   section { background: #1a1a2e; border-radius: 12px; padding: 24px; }
   section h2 { font-size: 14px; color: #888; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 16px; }
-  #state-badge { font-size: 32px; font-weight: bold; text-align: center; padding: 28px; border-radius: 8px; background: #555; color: white; transition: all 0.3s; margin-bottom: 10px; text-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+  .state-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  #state-badge { flex: 1; font-size: 32px; font-weight: bold; text-align: center; padding: 28px; border-radius: 8px; background: #555; color: white; transition: all 0.3s; text-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+  #led-indicator { width: 60px; height: 60px; border-radius: 50%; background: #555; transition: all 0.3s; box-shadow: 0 0 12px rgba(255,255,255,0.1); }
   #state-display { text-align: center; font-size: 18px; font-weight: 500; color: #ccc; margin-bottom: 14px; }
   #state-explain { text-align: center; font-size: 13px; color: #888; margin-bottom: 14px; line-height: 1.5; }
   #position { text-align: center; color: #888; font-family: "Monaco", monospace; font-size: 14px; }
@@ -46,7 +49,7 @@
   .speed-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
   .speed-row label { width: 90px; color: #aaa; font-size: 13px; }
   .speed-row input[type=range] { flex: 1; }
-  .speed-row .value { width: 60px; text-align: right; font-family: "Monaco", monospace; font-size: 13px; color: #4a90e2; }
+  .speed-row .value { width: 70px; text-align: right; font-family: "Monaco", monospace; font-size: 13px; color: #4a90e2; }
   #stop-btn { background: #b22222; width: 100%; padding: 14px; font-weight: bold; color: white; border: none; border-radius: 8px; font-size: 15px; cursor: pointer; margin-top: 8px; }
   #stop-btn:hover { background: #cc2222; }
   .help { font-size: 12px; color: #666; text-align: center; margin-top: 8px; }
@@ -57,6 +60,8 @@
 <header>
   <h1>🤖 QBot Fleet Manager</h1>
   <div class="header-right">
+    <input id="host-input" type="text" placeholder="192.168.0.72" value="" title="Robot IP (leave blank for localhost)" />
+    <button onclick="reconnect()" style="background:#2a2a3e;color:#ccc;border:none;padding:6px 10px;border-radius:20px;cursor:pointer;font-size:13px;">↻ Connect</button>
     <label class="audio-toggle">
       <input type="checkbox" id="audio-toggle" checked />
       🔊 Voice
@@ -68,7 +73,10 @@
 <main>
   <section>
     <h2>Robot Status</h2>
-    <div id="state-badge">UNKNOWN</div>
+    <div class="state-row">
+      <div id="state-badge">UNKNOWN</div>
+      <div id="led-indicator" title="Mirrors robot LED color"></div>
+    </div>
     <div id="state-display">-</div>
     <div id="state-explain">Waiting for the robot system to come online...</div>
     <div id="position">Position: x=0.00, y=0.00</div>
@@ -80,7 +88,7 @@
       <div id="cam-placeholder">
         <span class="icon">📷</span>
         Camera Offline<br>
-        <small>Start web_video_server inside the container, then click Reload</small>
+        <small>Start web_video_server on the bot, then click Reload</small>
       </div>
       <img id="cam-stream" alt="" />
     </div>
@@ -93,12 +101,12 @@
   <section>
     <h2>Send To Destination</h2>
     <div class="dest-grid">
-      <button onclick="goTo(0, 0, 'Home')">🏠 Home</button>
-      <button onclick="goTo(2, 0, 'Front of Class')">📚 Front of Class</button>
-      <button onclick="goTo(-2, 0, 'Back of Class')">🚪 Back of Class</button>
-      <button onclick="goTo(0, 2, 'Teacher Desk')">👨‍🏫 Teacher's Desk</button>
-      <button onclick="goTo(0, -2, 'Window')">🪟 Window Side</button>
-      <button onclick="goTo(2, 2, 'Far Corner')">📦 Far Corner</button>
+      <button onclick="goTo(0, 0, 'Home')">🏠 Home (0, 0)</button>
+      <button onclick="goTo(2, 0, 'Front of Class')">📚 Front (2, 0)</button>
+      <button onclick="goTo(-2, 0, 'Back of Class')">🚪 Back (-2, 0)</button>
+      <button onclick="goTo(0, 2, 'Teacher Desk')">👨‍🏫 Teacher (0, 2)</button>
+      <button onclick="goTo(0, -2, 'Window')">🪟 Window (0, -2)</button>
+      <button onclick="goTo(2, 2, 'Far Corner')">📦 Corner (2, 2)</button>
     </div>
     <div class="custom-dest">
       <label>X:</label>
@@ -110,10 +118,10 @@
   </section>
 
   <section>
-    <h2>State Legend — what each color means</h2>
+    <h2>State Legend</h2>
     <div class="legend-grid">
       <div class="legend-item"><div class="legend-color" style="background:#FFFFFF;"></div><div class="legend-text"><strong>WAITING</strong><small>Idle, ready</small></div></div>
-      <div class="legend-item"><div class="legend-color" style="background:#FFCC00;"></div><div class="legend-text"><strong>SET_DESTINATION</strong><small>Got order</small></div></div>
+      <div class="legend-item"><div class="legend-color" style="background:#FFCC00;"></div><div class="legend-text"><strong>SET_DEST</strong><small>Got order</small></div></div>
       <div class="legend-item"><div class="legend-color" style="background:#FFCC00;"></div><div class="legend-text"><strong>SIGNAL_MOVE</strong><small>About to move</small></div></div>
       <div class="legend-item"><div class="legend-color" style="background:#00FF00;"></div><div class="legend-text"><strong>MOVING</strong><small>Driving to goal</small></div></div>
       <div class="legend-item"><div class="legend-color" style="background:#FF0000;"></div><div class="legend-text"><strong>YIELD_STOP</strong><small>Obstacle ahead</small></div></div>
@@ -139,13 +147,13 @@
     </div>
     <div class="speed-row">
       <label>Linear speed</label>
-      <input type="range" min="0.05" max="1.0" step="0.05" value="0.2" id="lin-slider" oninput="updateSpeed()" />
-      <span class="value" id="lin-val">0.20 m/s</span>
+      <input type="range" min="0.05" max="1.0" step="0.05" value="0.4" id="lin-slider" oninput="updateSpeed()" />
+      <span class="value" id="lin-val">0.40 m/s</span>
     </div>
     <div class="speed-row">
       <label>Angular speed</label>
-      <input type="range" min="0.1" max="2.0" step="0.1" value="0.5" id="ang-slider" oninput="updateSpeed()" />
-      <span class="value" id="ang-val">0.50 rad/s</span>
+      <input type="range" min="0.1" max="2.0" step="0.1" value="1.0" id="ang-slider" oninput="updateSpeed()" />
+      <span class="value" id="ang-val">1.00 rad/s</span>
     </div>
     <p class="help">Use keyboard WASD or click/hold buttons. Spacebar to stop.</p>
     <button id="stop-btn" onclick="stop()">EMERGENCY STOP</button>
@@ -153,71 +161,118 @@
 </main>
 
 <script>
+  // --- Host configuration ----------------------------------------
+  // Default: read from URL param `?host=192.168.0.72`, else use 'localhost' for sim.
+  // At lab, type the bot IP in the header input and click "Connect".
+  function getDefaultHost() {
+    const p = new URLSearchParams(window.location.search);
+    return p.get('host') || localStorage.getItem('qbot_host') || 'localhost';
+  }
+
+  let HOST = getDefaultHost();
+  document.getElementById('host-input').value = HOST;
+
+  // --- State / color info ----------------------------------------
   const STATE_INFO = {
-    'WAITING':         { bg: '#FFFFFF', text: '#000', display: 'READY',          explain: 'Robot is idle and ready to receive an order.',                                phrase: 'Ready for next order.' },
-    'SET_DESTINATION': { bg: '#FFCC00', text: '#000', display: 'PREPARING',      explain: 'Got the order. Getting ready to move.',                                       phrase: 'Order received.' },
-    'SIGNAL_MOVE':     { bg: '#FFCC00', text: '#000', display: 'ABOUT TO MOVE',  explain: 'Signaling intent — robot is about to start driving. Stand clear.',            phrase: 'Please stand clear, I am about to move.' },
-    'MOVING':          { bg: '#00FF00', text: '#000', display: 'MOVING',         explain: 'Driving to the destination. Watching for obstacles.',                         phrase: 'Moving to destination.' },
-    'YIELD_STOP':      { bg: '#FF0000', text: '#fff', display: 'YIELDING',       explain: 'Person or object detected ahead. Robot is paused until path is clear.',       phrase: 'Excuse me, please clear the path.' },
-    'DELIVERY_READY':  { bg: '#0080FF', text: '#fff', display: 'DELIVERY READY', explain: 'Arrived at destination. Waiting briefly for handoff.',                        phrase: 'Please pick up your order.' },
-    'DELIVER':         { bg: '#FF00FF', text: '#fff', display: 'DELIVERING',     explain: 'Performing the delivery action.',                                             phrase: 'Delivering.' },
-    'RETURN_HOME':     { bg: '#00FF80', text: '#000', display: 'RETURNING HOME', explain: 'Delivery complete. Heading back to start position.',                          phrase: 'Order delivered. Returning home.' },
-    'ERROR':           { bg: '#FF0000', text: '#fff', display: 'ERROR',          explain: 'Something went wrong. Robot is stopped.',                                     phrase: 'Error. Attention needed.' }
+    'WAITING':         { bg: '#FFFFFF', text: '#000', display: 'READY',          explain: 'Robot is idle and ready to receive an order.' },
+    'SET_DESTINATION': { bg: '#FFCC00', text: '#000', display: 'PREPARING',      explain: 'Got the order. Getting ready to move.' },
+    'SIGNAL_MOVE':     { bg: '#FFCC00', text: '#000', display: 'ABOUT TO MOVE',  explain: 'Signaling intent — robot is about to start driving. Stand clear.' },
+    'MOVING':          { bg: '#00FF00', text: '#000', display: 'MOVING',         explain: 'Driving to the destination. Watching for obstacles.' },
+    'YIELD_STOP':      { bg: '#FF0000', text: '#fff', display: 'YIELDING',       explain: 'Person or object detected ahead. Robot is paused until path is clear.' },
+    'DELIVERY_READY':  { bg: '#0080FF', text: '#fff', display: 'DELIVERY READY', explain: 'Arrived at destination. Waiting briefly for handoff.' },
+    'DELIVER':         { bg: '#FF00FF', text: '#fff', display: 'DELIVERING',     explain: 'Performing the delivery action.' },
+    'RETURN_HOME':     { bg: '#00FF80', text: '#000', display: 'RETURNING HOME', explain: 'Delivery complete. Heading back to start position.' },
+    'ERROR':           { bg: '#FF0000', text: '#fff', display: 'ERROR',          explain: 'Something went wrong. Robot is stopped.' }
   };
 
-  let linSpeed = 0.2, angSpeed = 0.5;
+  let linSpeed = 0.4, angSpeed = 1.0;
 
-  // Voice / TTS
+  // --- Voice / TTS -----------------------------------------------
   function speak(text) {
     const enabled = document.getElementById('audio-toggle').checked;
     if (!enabled || !window.speechSynthesis) return;
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.0;
-    u.pitch = 1.0;
-    u.volume = 1.0;
+    u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
     speechSynthesis.speak(u);
   }
 
-  // ROS connection
-  const ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
-  ros.on('connection', () => { document.getElementById('connection').innerHTML = '🟢 Connected'; });
-  ros.on('error', () => { document.getElementById('connection').innerHTML = '🔴 Error'; });
-  ros.on('close', () => { document.getElementById('connection').innerHTML = '⚪ Disconnected'; });
+  // --- ROS connection (with reconnect support) -------------------
+  let ros = null;
+  let destTopic = null, cmdTopic = null;
 
-  // State subscriber - update UI + speak
-  let lastSpokenState = null;
-  new ROSLIB.Topic({ ros, name: '/robot_state', messageType: 'std_msgs/String' })
-    .subscribe((msg) => {
-      const info = STATE_INFO[msg.data];
-      const badge = document.getElementById('state-badge');
-      const display = document.getElementById('state-display');
-      const explain = document.getElementById('state-explain');
-      if (info) {
-        badge.innerText = msg.data;
-        badge.style.background = info.bg;
-        badge.style.color = info.text;
-        display.innerText = '→ ' + info.display;
-        explain.innerText = info.explain;
-        // Only speak when state CHANGES (not every tick)
-        if (msg.data !== lastSpokenState) {
-          lastSpokenState = msg.data;
-          if (info.phrase) speak(info.phrase);
-        }
-      }
+  function connect() {
+    if (ros) { try { ros.close(); } catch(e) {} }
+    document.getElementById('connection').innerHTML = '🟡 Connecting...';
+    ros = new ROSLIB.Ros({ url: 'ws://' + HOST + ':9090' });
+
+    ros.on('connection', () => {
+      document.getElementById('connection').innerHTML = '🟢 Connected to ' + HOST;
+      localStorage.setItem('qbot_host', HOST);
     });
+    ros.on('error',  () => { document.getElementById('connection').innerHTML = '🔴 Error connecting to ' + HOST; });
+    ros.on('close',  () => { document.getElementById('connection').innerHTML = '⚪ Disconnected from ' + HOST; });
 
-  // Odom
-  new ROSLIB.Topic({ ros, name: '/odom', messageType: 'nav_msgs/Odometry' })
-    .subscribe((msg) => {
-      const x = msg.pose.pose.position.x.toFixed(2);
-      const y = msg.pose.pose.position.y.toFixed(2);
-      document.getElementById('position').innerText = 'Position: x=' + x + ', y=' + y;
-    });
+    // Subscribers
+    new ROSLIB.Topic({ ros, name: '/robot_state', messageType: 'std_msgs/String' })
+      .subscribe(onState);
+    new ROSLIB.Topic({ ros, name: '/odom', messageType: 'nav_msgs/Odometry' })
+      .subscribe(onOdom);
+    new ROSLIB.Topic({ ros, name: '/voice/announce', messageType: 'std_msgs/String' })
+      .subscribe(onVoiceAnnounce);
+    new ROSLIB.Topic({ ros, name: '/intent/color', messageType: 'std_msgs/ColorRGBA' })
+      .subscribe(onColor);
 
-  // Destination
-  const destTopic = new ROSLIB.Topic({ ros, name: '/destination', messageType: 'geometry_msgs/Point' });
+    // Publishers
+    destTopic = new ROSLIB.Topic({ ros, name: '/destination', messageType: 'geometry_msgs/Point' });
+    cmdTopic  = new ROSLIB.Topic({ ros, name: '/cmd_vel',     messageType: 'geometry_msgs/Twist' });
+  }
+
+  function reconnect() {
+    HOST = document.getElementById('host-input').value.trim() || 'localhost';
+    connect();
+    setTimeout(loadCamera, 500);
+  }
+
+  // --- Subscribers callbacks -------------------------------------
+  function onState(msg) {
+    const info = STATE_INFO[msg.data];
+    const badge = document.getElementById('state-badge');
+    const display = document.getElementById('state-display');
+    const explain = document.getElementById('state-explain');
+    if (info) {
+      badge.innerText = msg.data;
+      badge.style.background = info.bg;
+      badge.style.color = info.text;
+      display.innerText = '→ ' + info.display;
+      explain.innerText = info.explain;
+    }
+  }
+
+  function onOdom(msg) {
+    const x = msg.pose.pose.position.x.toFixed(2);
+    const y = msg.pose.pose.position.y.toFixed(2);
+    document.getElementById('position').innerText = 'Position: x=' + x + ', y=' + y;
+  }
+
+  // Voice driven directly by the bot's intent_communication node — accurate timing.
+  function onVoiceAnnounce(msg) {
+    if (msg.data) speak(msg.data);
+  }
+
+  // LED color mirror — shows the same RGB the bot's LED strip displays.
+  function onColor(msg) {
+    const led = document.getElementById('led-indicator');
+    const r = Math.round((msg.r ?? 0) * 255);
+    const g = Math.round((msg.g ?? 0) * 255);
+    const b = Math.round((msg.b ?? 0) * 255);
+    led.style.background = `rgb(${r}, ${g}, ${b})`;
+    led.style.boxShadow  = `0 0 20px rgba(${r}, ${g}, ${b}, 0.7)`;
+  }
+
+  // --- Publishers -------------------------------------------------
   function goTo(x, y, label) {
+    if (!destTopic) return;
     destTopic.publish(new ROSLIB.Message({ x, y, z: 0 }));
     speak('Sending robot to ' + label);
   }
@@ -226,13 +281,11 @@
     const y = parseFloat(document.getElementById('cust-y').value) || 0;
     goTo(x, y, 'custom location');
   }
-
-  // Cmd vel
-  const cmdTopic = new ROSLIB.Topic({ ros, name: '/cmd_vel', messageType: 'geometry_msgs/Twist' });
   function drive(linear, angular) {
+    if (!cmdTopic) return;
     cmdTopic.publish(new ROSLIB.Message({
-      linear:  { x: linear,  y: 0, z: 0 },
-      angular: { x: 0, y: 0, z: angular }
+      linear:  { x: linear, y: 0, z: 0 },
+      angular: { x: 0,      y: 0, z: angular }
     }));
   }
   function stop() { drive(0, 0); }
@@ -244,11 +297,13 @@
     document.getElementById('ang-val').innerText = angSpeed.toFixed(2) + ' rad/s';
   }
 
-  // Keyboard WASD
+  // --- Keyboard WASD ---------------------------------------------
   const activeKeys = new Set();
   document.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
     if (['w','a','s','d',' '].includes(k)) {
+      // Don't capture keys when typing in input fields
+      if (document.activeElement.tagName === 'INPUT') return;
       e.preventDefault();
       if (k === ' ') { stop(); return; }
       if (!activeKeys.has(k)) { activeKeys.add(k); updateMovement(); }
@@ -267,17 +322,20 @@
     drive(lin, ang);
   }
 
-  // Camera
+  // --- Camera -----------------------------------------------------
   function loadCamera() {
     const topic = document.getElementById('cam-topic').value;
     const img = document.getElementById('cam-stream');
     const placeholder = document.getElementById('cam-placeholder');
     img.style.display = 'none';
     placeholder.style.display = 'block';
-    img.onload = () => { img.style.display = 'block'; placeholder.style.display = 'none'; };
-    img.onerror = () => { img.style.display = 'none'; placeholder.style.display = 'block'; };
-    img.src = 'http://localhost:8080/stream?topic=' + encodeURIComponent(topic) + '&t=' + Date.now();
+    img.onload  = () => { img.style.display = 'block'; placeholder.style.display = 'none'; };
+    img.onerror = () => { img.style.display = 'none';  placeholder.style.display = 'block'; };
+    img.src = 'http://' + HOST + ':8080/stream?topic=' + encodeURIComponent(topic) + '&t=' + Date.now();
   }
+
+  // --- Boot --------------------------------------------------------
+  connect();
   setTimeout(loadCamera, 500);
 </script>
 </body>
