@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Simplified Delivery Bot state machine.
-States: WAITING -> ORDER_RECEIVED -> TRAVELING -> DELIVERED -> RETURNING -> RETURNED -> WAITING
+"""Delivery Bot state machine.
+States: WAITING -> ORDER_RECEIVED -> TRAVELING -> DELIVERED -> RETURNING -> RETURNED
+TRAVELING: drives forward to delivery
+RETURNING: drives REVERSE straight back to home (no U-turn)
 """
 import math, json
 from enum import Enum
@@ -43,9 +45,9 @@ class StateMachine(Node):
         self.pos     = (0.0, 0.0)
         self.heading = 0.0
         self.target  = None
-        self._enter_time      = self.get_clock().now()
-        self._wd_last_dist    = float('inf')
-        self._wd_last_time    = self.get_clock().now()
+        self._enter_time = self.get_clock().now()
+        self._wd_last_dist = float('inf')
+        self._wd_last_time = self.get_clock().now()
 
         self.cmd_pub   = self.create_publisher(Twist, '/cmd_vel', 10)
         self.state_pub = self.create_publisher(String, '/robot_state', 10)
@@ -55,7 +57,7 @@ class StateMachine(Node):
         self.create_timer(0.1, self.tick)
 
         self.get_logger().info(
-            f"State machine ready. State={self.state.value} home=({self.home[0]:.2f}, {self.home[1]:.2f}) "
+            f"State machine ready. State={self.state.value} home=({self.home[0]:.2f},{self.home[1]:.2f}) "
             f"lin={self.linear_speed} ang={self.angular_speed} tol={self.goal_tolerance}"
         )
 
@@ -64,7 +66,7 @@ class StateMachine(Node):
             with open(self.waypoints_file) as f:
                 data = json.load(f)
             h = data.get('home', {'x': 0.0, 'y': 0.0})
-            self.get_logger().info(f"Loaded home from {self.waypoints_file}: ({h['x']:.2f}, {h['y']:.2f})")
+            self.get_logger().info(f"Loaded home: ({h['x']:.2f}, {h['y']:.2f})")
             return (h['x'], h['y'])
         except Exception as e:
             self.get_logger().warn(f"No waypoints ({e}), using (0,0)")
@@ -102,15 +104,25 @@ class StateMachine(Node):
     def _stop(self):
         self.cmd_pub.publish(Twist())
 
-    def _drive_toward(self, target):
+    def _drive_forward(self, target):
+        """Drive forward toward target with mild steering correction."""
         dx, dy = target[0] - self.pos[0], target[1] - self.pos[1]
         dist = math.hypot(dx, dy)
         err = math.atan2(dy, dx) - self.heading
         while err > math.pi:  err -= 2*math.pi
         while err < -math.pi: err += 2*math.pi
         cmd = Twist()
-        cmd.linear.x  = self.linear_speed if abs(err) < 0.5 else 0.0
+        cmd.linear.x  = self.linear_speed
         cmd.angular.z = max(-self.angular_speed, min(self.angular_speed, err * self.steering_gain))
+        self.cmd_pub.publish(cmd)
+        return dist
+
+    def _drive_reverse(self, target):
+        """Drive REVERSE straight back. No turning, no U-turn."""
+        dist = math.hypot(target[0] - self.pos[0], target[1] - self.pos[1])
+        cmd = Twist()
+        cmd.linear.x = -self.linear_speed * 0.7  # slower in reverse for safety
+        cmd.angular.z = 0.0
         self.cmd_pub.publish(cmd)
         return dist
 
@@ -130,7 +142,7 @@ class StateMachine(Node):
             if self._t_in_state() > 2.0:
                 self._transition(State.TRAVELING)
         elif self.state == State.TRAVELING:
-            dist = self._drive_toward(self.target)
+            dist = self._drive_forward(self.target)
             self._watchdog(dist)
             if dist < self.goal_tolerance:
                 self._stop()
@@ -140,7 +152,7 @@ class StateMachine(Node):
             if self._t_in_state() > 3.0:
                 self._transition(State.RETURNING)
         elif self.state == State.RETURNING:
-            dist = self._drive_toward(self.home)
+            dist = self._drive_reverse(self.home)
             self._watchdog(dist)
             if dist < self.goal_tolerance:
                 self._stop()
